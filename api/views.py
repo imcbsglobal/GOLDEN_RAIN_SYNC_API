@@ -13,7 +13,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 
-from .models import Product, SyncUser, Firm, ProductPhoto, Customer, SyncLog
+from .models import Product, SyncUser, Firm, ProductPhoto, Customer, Ledger, SyncLog
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +258,159 @@ class CustomerListView(APIView):
 
 
 # ══════════════════════════════════════════════════════
+#  LEDGERS   /api/sync/ledgers/
+#
+#  GET  — returns ledger rows for DEBTO customers only.
+#         Optional query params:
+#           ?code=CUST001          filter by one customer code
+#           ?date_from=YYYY-MM-DD  filter by date range
+#           ?date_to=YYYY-MM-DD
+#
+#  POST — upsert payload (list of ledger dicts).
+#         Required fields per row: accno, code
+#         Optional fields: particulars, debit, credit,
+#           entry_mode, date, voucher_no, narration
+#
+#         customer_name is resolved automatically from the
+#         local acc_master mirror (DEBTO only).
+#         Rows whose code is NOT a DEBTO customer are
+#         silently skipped — this keeps the ledger table
+#         clean and consistent with the customer table.
+# ══════════════════════════════════════════════════════
+
+class LedgerListView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        # Only expose DEBTO customer ledgers
+        debto_codes = Customer.objects.filter(
+            super_code="DEBTO"
+        ).values_list("code", flat=True)
+
+        qs = Ledger.objects.filter(code__in=debto_codes)
+
+        # Optional filters
+        code = request.query_params.get("code")
+        if code:
+            qs = qs.filter(code=code)
+
+        date_from = request.query_params.get("date_from")
+        if date_from:
+            qs = qs.filter(date__gte=date_from)
+
+        date_to = request.query_params.get("date_to")
+        if date_to:
+            qs = qs.filter(date__lte=date_to)
+
+        rows = qs.values(
+            "accno", "code", "customer_name",
+            "particulars", "debit", "credit",
+            "entry_mode", "date", "voucher_no", "narration",
+        )
+        return Response({"count": len(rows), "results": list(rows)})
+
+    def post(self, request):
+        """
+        Payload: [
+          {
+            accno, code, particulars, debit, credit,
+            entry_mode, date, voucher_no, narration
+          }, ...
+        ]
+
+        - accno and code are required.
+        - customer_name is resolved automatically from the local
+          Customer table (DEBTO super_code only).
+        - Rows for non-DEBTO codes are skipped (errors counter).
+        """
+        payload = request.data
+        if not isinstance(payload, list):
+            return _bad("Expected a JSON array.")
+
+        # Build a code→name lookup from the local mirror (DEBTO only)
+        name_map = dict(
+            Customer.objects.filter(super_code="DEBTO").values_list("code", "name")
+        )
+
+        errors = 0
+        skipped = 0
+        objs = []
+        for item in payload:
+            accno = item.get("accno")
+            code  = (item.get("code") or "").strip()
+
+            if not accno or not code:
+                errors += 1
+                continue
+
+            # Only accept ledger rows for DEBTO customers
+            if code not in name_map:
+                skipped += 1
+                continue
+
+            # Resolve customer name from local mirror
+            customer_name = name_map[code]
+
+            objs.append(Ledger(
+                accno=accno,
+                code=code,
+                customer_name=customer_name,
+                particulars=item.get("particulars"),
+                debit=item.get("debit"),
+                credit=item.get("credit"),
+                entry_mode=item.get("entry_mode"),
+                date=item.get("date") or None,
+                voucher_no=item.get("voucher_no"),
+                narration=item.get("narration"),
+            ))
+
+        Ledger.objects.bulk_create(
+            objs,
+            update_conflicts=True,
+            unique_fields=["accno"],
+            update_fields=[
+                "code", "customer_name", "particulars",
+                "debit", "credit", "entry_mode",
+                "date", "voucher_no", "narration", "synced_at",
+            ],
+        )
+
+        _log("ledgers", len(payload), len(objs))
+        return Response({
+            "received": len(payload),
+            "saved":    len(objs),
+            "skipped":  skipped,
+            "errors":   errors,
+            "status":   "ok",
+        })
+
+
+
+
+# ══════════════════════════════════════════════════════
+#  TRUNCATE   /api/sync/truncate/
+#
+#  POST — clears all synced tables before a fresh sync.
+#         Called automatically by sync.py when auto_truncate=True.
+# ══════════════════════════════════════════════════════
+
+class TruncateView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        try:
+            Ledger.objects.all().delete()
+            Customer.objects.all().delete()
+            ProductPhoto.objects.all().delete()
+            SyncUser.objects.all().delete()
+            Firm.objects.all().delete()
+            Product.objects.all().delete()
+            _log("truncate", 0, 0)
+            return Response({"status": "ok", "message": "All sync tables cleared."})
+        except Exception as exc:
+            logger.error("Truncate failed: %s", exc)
+            return Response({"error": str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+# ══════════════════════════════════════════════════════
 #  FULL SYNC   /api/sync/all/
 # ══════════════════════════════════════════════════════
 
@@ -265,12 +418,17 @@ class FullSyncView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        debto_codes = Customer.objects.filter(
+            super_code="DEBTO"
+        ).values_list("code", flat=True)
+
         data = {
-            "products":      list(Product.objects.all().values()),
-            "users":         list(SyncUser.objects.all().values()),
-            "firm":          Firm.objects.first().__dict__ if Firm.objects.exists() else {},
+            "products":       list(Product.objects.all().values()),
+            "users":          list(SyncUser.objects.all().values()),
+            "firm":           Firm.objects.first().__dict__ if Firm.objects.exists() else {},
             "product_photos": list(ProductPhoto.objects.all().values()),
-            "customers":     list(Customer.objects.all().values()),
+            "customers":      list(Customer.objects.filter(super_code="DEBTO").values()),
+            "ledgers":        list(Ledger.objects.filter(code__in=debto_codes).values()),
         }
         # remove _state key from firm dict if present
         data["firm"].pop("_state", None)

@@ -108,6 +108,45 @@ class Customer(models.Model):
 
 
 # ══════════════════════════════════════════════════════
+#  Ledger  ←  acc_ledgers  (DEBTO customers only)
+#
+#  Stores ledger entries for debtors (customers whose
+#  acc_master.super_code = 'DEBTO').  The customer name
+#  is denormalised here (customer_name) so the mobile
+#  app never needs a second join.
+#
+#  Fields sourced from acc_ledgers:
+#    accno, code, particulars, debit, credit,
+#    entry_mode, date, voucher_no, narration
+#
+#  customer_name is resolved locally from acc_master
+#  (super_code = 'DEBTO') and stored for convenience.
+# ══════════════════════════════════════════════════════
+
+class Ledger(models.Model):
+    accno         = models.BigIntegerField(primary_key=True)   # acc_ledgers.accno  (PK in source)
+    code          = models.CharField(max_length=30, db_index=True)   # acc_master.code (FK)
+    customer_name = models.CharField(max_length=250, blank=True, null=True)  # denormalised from acc_master
+    particulars   = models.CharField(max_length=250, blank=True, null=True)
+    debit         = models.DecimalField(max_digits=15, decimal_places=5,
+                                        blank=True, null=True)
+    credit        = models.DecimalField(max_digits=15, decimal_places=5,
+                                        blank=True, null=True)
+    entry_mode    = models.CharField(max_length=30, blank=True, null=True)
+    date          = models.DateField(blank=True, null=True)
+    voucher_no    = models.BigIntegerField(blank=True, null=True)
+    narration     = models.CharField(max_length=250, blank=True, null=True)
+    synced_at     = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "acc_ledgers"
+        ordering = ["code", "date", "accno"]
+
+    def __str__(self):
+        return f"{self.code} | {self.date} | debit={self.debit} credit={self.credit}"
+
+
+# ══════════════════════════════════════════════════════
 #  SyncLog  (audit trail — not in PKTC source DB)
 # ══════════════════════════════════════════════════════
 
