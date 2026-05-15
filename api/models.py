@@ -19,6 +19,7 @@ class Product(models.Model):
     product   = models.CharField(max_length=30,  blank=True, null=True)
     brand     = models.CharField(max_length=30,  blank=True, null=True)
     company   = models.CharField(max_length=30,  blank=True, null=True)
+    settings  = models.TextField(blank=True, null=True)
     synced_at = models.DateTimeField(auto_now=True)
 
     class Meta:

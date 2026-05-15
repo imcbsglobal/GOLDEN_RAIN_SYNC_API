@@ -45,7 +45,7 @@ class ProductListView(APIView):
 
     def get(self, request):
         products = Product.objects.all().values(
-            "code", "name", "defected", "product", "brand", "company"
+            "code", "name", "defected", "product", "brand", "company", "settings"
         )
         return Response({"count": len(products), "results": list(products)})
 
@@ -69,13 +69,14 @@ class ProductListView(APIView):
                 product=item.get("product"),
                 brand=item.get("brand"),
                 company=item.get("company"),
+                settings=item.get("settings"),
             ))
 
         Product.objects.bulk_create(
             objs,
             update_conflicts=True,
             unique_fields=["code"],
-            update_fields=["name", "defected", "product", "brand", "company", "synced_at"],
+            update_fields=["name", "defected", "product", "brand", "company", "settings", "synced_at"],
         )
 
         _log("products", len(payload), len(objs))
